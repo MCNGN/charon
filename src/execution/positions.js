@@ -12,10 +12,78 @@ import { updateCandidateSnapshot } from '../db/candidates.js';
 import { trending } from '../signals/trending.js';
 import { executeLiveSell } from './router.js';
 import { sendPositionExit } from '../telegram/send.js';
+import { getActiveChain, fromSmallestUnit } from '../chain/index.js';
+import { fetchTokenInfo as fetchDexscreenerTokenInfo } from '../chain/dexscreener.js';
+
+// ── Chain-aware token data helpers ──────────────────────────────────
+
+function isSolana() {
+  return getActiveChain().type === 'solana';
+}
+
+/**
+ * Fetch token asset/price info — Jupiter for Solana, DexScreener for EVM.
+ * Returns a normalized object with usdPrice, mcap, fdv, liquidity, holderCount, name, symbol, etc.
+ */
+async function fetchTokenAsset(mint, opts = {}) {
+  if (isSolana()) {
+    return fetchJupiterAsset(mint, opts);
+  }
+  // EVM: DexScreener — normalize to Jupiter-like shape
+  const info = await fetchDexscreenerTokenInfo(mint);
+  if (!info) return null;
+  return {
+    id: mint,
+    name: info.name,
+    symbol: info.symbol,
+    usdPrice: info.price,
+    mcap: info.marketCap,
+    fdv: info.marketCap,
+    liquidity: info.liquidity,
+    holderCount: null, // DexScreener doesn't provide holder count
+    fees: null,
+    twitter: null,
+    website: null,
+    // pass through dexscreener-specific fields
+    _dexscreener: info,
+  };
+}
+
+/**
+ * Fetch token holders — Jupiter for Solana, empty for EVM (no equivalent API).
+ */
+async function fetchTokenHolders(mint) {
+  if (isSolana()) {
+    return fetchJupiterHolders(mint);
+  }
+  return { count: 0, holders: [], top20: [], top20Percent: null, maxHolderPercent: null };
+}
+
+/**
+ * Fetch chart context — Jupiter for Solana, null for EVM (DexScreener chart is pair-based, not token-based).
+ */
+async function fetchTokenChartContext(mint) {
+  if (isSolana()) {
+    return fetchJupiterChartContext(mint);
+  }
+  return null;
+}
+
+/**
+ * Fetch wallet PnL — Jupiter for Solana, empty for EVM (no equivalent API).
+ */
+async function fetchWalletPnl(walletAddress) {
+  if (isSolana()) {
+    return fetchJupiterWalletPnl(walletAddress);
+  }
+  return {};
+}
+
+// ── Exported position functions ─────────────────────────────────────
 
 export async function freshEntryMarket(mint, candidate) {
   const gmgn = await fetchGmgnTokenInfo(mint, false);
-  const asset = await fetchJupiterAsset(mint, { useCache: false });
+  const asset = await fetchTokenAsset(mint, { useCache: false });
   const priceUsd = firstPositiveNumber(tokenPriceFromGmgn(gmgn), asset?.usdPrice, candidate.metrics?.priceUsd);
   const marketCapUsd = firstPositiveNumber(
     marketCapFromGmgn(gmgn),
@@ -31,9 +99,9 @@ export async function refreshCandidateForExecution(row) {
   const candidate = row.candidate;
   const mint = candidate.token.mint;
   const gmgn = await fetchGmgnTokenInfo(mint, false);
-  const asset = await fetchJupiterAsset(mint, { useCache: false });
-  const holders = await fetchJupiterHolders(mint);
-  const chart = await fetchJupiterChartContext(mint);
+  const asset = await fetchTokenAsset(mint, { useCache: false });
+  const holders = await fetchTokenHolders(mint);
+  const chart = await fetchTokenChartContext(mint);
   const selectedTrending = trending.get(mint) || candidate.trending || null;
   const selectedHolders = holders?.holders?.length ? holders : candidate.holders;
   const selectedSavedWalletExposure = selectedHolders
@@ -108,7 +176,7 @@ export async function refreshCandidateForExecution(row) {
 const sellInProgress = new Set();
 
 export async function refreshPosition(position, { autoExit = true, jupiterPnl = null } = {}) {
-  const asset = await fetchJupiterAsset(position.mint);
+  const asset = await fetchTokenAsset(position.mint);
   const price = firstPositiveNumber(asset?.usdPrice, position.high_water_price, position.entry_price);
   const mcap = firstPositiveNumber(asset?.mcap, asset?.fdv, position.high_water_mcap, position.entry_mcap);
   if (!Number.isFinite(Number(mcap)) || !Number.isFinite(Number(position.entry_mcap)) || Number(position.entry_mcap) <= 0) {
@@ -117,6 +185,8 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
   const highWaterMcap = Math.max(Number(position.high_water_mcap || 0), Number(mcap));
   const highWaterPrice = Math.max(Number(position.high_water_price || 0), Number(price || 0));
   let pnlPercent = (Number(mcap) / Number(position.entry_mcap) - 1) * 100;
+  // Use fromSmallestUnit for chain-agnostic native token conversion
+  // (size_sol column name kept for DB backward compatibility)
   let pnlSol = Number(position.size_sol) * pnlPercent / 100;
   if (jupiterPnl && Number.isFinite(Number(jupiterPnl.totalPnlPercentageNative))) {
     pnlPercent = Number(jupiterPnl.totalPnlPercentageNative);
@@ -168,7 +238,7 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
     else if (trailingHit) exitReason = 'TRAILING_TP';
   }
 
-  // Live exits will override these with realized SOL values
+  // Live exits will override these with realized native token values
   let finalPnlPercent = pnlPercent;
   let finalPnlSol = pnlSol;
 
@@ -187,11 +257,12 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
     } finally {
       sellInProgress.delete(position.id);
     }
-    const receivedLamports = Number(sell.outputAmount || 0);
-    const receivedSol = receivedLamports > 0 ? receivedLamports / 1_000_000_000 : null;
-    if (receivedSol != null) {
-      finalPnlSol = receivedSol - Number(position.size_sol);
-      finalPnlPercent = (receivedSol / Number(position.size_sol) - 1) * 100;
+    const receivedSmallest = Number(sell.outputAmount || 0);
+    // Chain-agnostic: convert smallest unit (lamports/wei) to native token (SOL/ETH)
+    const receivedNative = receivedSmallest > 0 ? fromSmallestUnit(receivedSmallest) : null;
+    if (receivedNative != null) {
+      finalPnlSol = receivedNative - Number(position.size_sol);
+      finalPnlPercent = (receivedNative / Number(position.size_sol) - 1) * 100;
     }
     db.prepare(`
       UPDATE dry_run_positions
@@ -202,7 +273,7 @@ export async function refreshPosition(position, { autoExit = true, jupiterPnl = 
     db.prepare(`
       INSERT INTO dry_run_trades (position_id, mint, side, at_ms, price, mcap, size_sol, token_amount_est, reason, payload_json)
       VALUES (?, ?, 'sell', ?, ?, ?, ?, ?, ?, ?)
-    `).run(position.id, position.mint, now(), price, mcap, position.size_sol, position.token_amount_est, exitReason, json({ pnlPercent: finalPnlPercent, pnlSol: finalPnlSol, receivedSol: receivedSol ?? null, sell }));
+    `).run(position.id, position.mint, now(), price, mcap, position.size_sol, position.token_amount_est, exitReason, json({ pnlPercent: finalPnlPercent, pnlSol: finalPnlSol, receivedSol: receivedNative ?? null, sell }));
     closed = true;
   } else if (exitReason && autoExit) {
     db.prepare(`
@@ -242,7 +313,7 @@ export async function monitorPositions() {
   let walletPnlData = {};
   const pubkey = liveWalletPubkey();
   if (pubkey && positions.some(p => p.execution_mode === 'live')) {
-    walletPnlData = await fetchJupiterWalletPnl(pubkey);
+    walletPnlData = await fetchWalletPnl(pubkey);
   }
   for (const position of positions) {
     const jupiterPnl = position.execution_mode === 'live'

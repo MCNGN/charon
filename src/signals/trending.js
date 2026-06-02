@@ -5,6 +5,8 @@ import { numSetting, boolSetting, setting } from '../db/settings.js';
 import { db } from '../db/connection.js';
 import { gmgnBackoffActive, setGmgnBackoff, gmgnFetch, normalizedTrendingRows } from '../enrichment/gmgn.js';
 import { normalizeJupiterTrendingRow } from '../enrichment/jupiter.js';
+import { getActiveChain } from '../chain/config.js';
+import { fetchCombinedTrending } from '../chain/signals.js';
 
 export const trending = new Map();
 let degenHandler = null;
@@ -38,6 +40,11 @@ export function trendingSignalPass(row) {
 }
 
 export async function fetchJupiterTrendingRows(interval, limit) {
+  const chain = getActiveChain();
+  if (chain.type !== 'solana') {
+    console.log(`[trending:jupiter] Jupiter not available on ${chain.name}`);
+    return [];
+  }
   if (!JUPITER_API_KEY) {
     console.log('[trending:jupiter] JUPITER_API_KEY missing');
     return [];
@@ -55,18 +62,26 @@ export async function fetchJupiterTrendingRows(interval, limit) {
 }
 
 export async function fetchGmgnTrendingRows(interval, limit) {
+  const chain = getActiveChain();
   if (gmgnBackoffActive('trending')) return [];
-  const payload = await gmgnFetch('/v1/market/rank', {
-    params: {
-      chain: 'sol',
-      interval,
-      limit,
-      order_by: setting('trending_order_by', 'volume'),
-      direction: 'desc',
-      filters: ['renounced', 'frozen', 'not_wash_trading'],
-      platforms: ['Pump.fun', 'meteora_virtual_curve', 'pool_pump_amm'],
-    },
-  });
+
+  // Build platform filter: Pump.fun only on Solana
+  const isSolana = chain.type === 'solana';
+  const platforms = isSolana
+    ? ['Pump.fun', 'meteora_virtual_curve', 'pool_pump_amm']
+    : undefined; // undefined = let GMGN use chain-appropriate defaults
+
+  const params = {
+    chain: chain.gmgn.chain,
+    interval,
+    limit,
+    order_by: setting('trending_order_by', 'volume'),
+    direction: 'desc',
+    filters: ['renounced', 'frozen', 'not_wash_trading'],
+  };
+  if (platforms) params.platforms = platforms;
+
+  const payload = await gmgnFetch('/v1/market/rank', { params });
   return normalizedTrendingRows(payload).map((row, index) => ({
     ...row,
     interval,
@@ -80,23 +95,48 @@ export async function fetchGmgnTrending() {
     trending.clear();
     return;
   }
+  const chain = getActiveChain();
   const interval = setting('trending_interval', '5m');
   const limit = Math.max(1, Math.min(200, Math.floor(numSetting('trending_limit', 100))));
   const source = setting('trending_source', 'jupiter');
 
   try {
-    const rows = source === 'gmgn'
-      ? await fetchGmgnTrendingRows(interval, Math.min(100, limit))
-      : await fetchJupiterTrendingRows(interval, limit);
+    let rows;
+    if (chain.type !== 'solana') {
+      // EVM chains: use combined DexScreener + GMGN trending from chain/signals
+      const combined = await fetchCombinedTrending(limit);
+      rows = combined.map((row, index) => ({
+        ...row,
+        interval,
+        rank: index + 1,
+        source: row.sources?.includes('dexscreener') && row.sources?.includes('gmgn')
+          ? 'dexscreener+gmgn'
+          : row.sources?.[0] || 'combined',
+        swaps: row.swaps ?? row.gmgnData?.swaps ?? 0,
+        volume: row.volume24h ?? row.gmgnData?.volume24h ?? 0,
+        rug_ratio: row.rug_ratio ?? 0,
+        bundler_rate: row.bundler_rate ?? 0,
+      }));
+    } else {
+      // Solana: Jupiter or GMGN
+      rows = source === 'gmgn'
+        ? await fetchGmgnTrendingRows(interval, Math.min(100, limit))
+        : await fetchJupiterTrendingRows(interval, limit);
+    }
+
     const seenAt = now();
     const cutoff = seenAt - TRENDING_LOOKBACK_MS;
     for (const [mint, token] of trending) {
       if (Number(token.seenAt || 0) < cutoff) trending.delete(mint);
     }
     let tracked = 0;
+    const isSolana = chain.type === 'solana';
     for (const [index, row] of rows.entries()) {
       const mint = row?.address || row?.mint;
-      if (!mint || !String(mint).endsWith('pump') || !trendingSignalPass(row)) continue;
+      if (!mint) continue;
+      // Only apply .endsWith('pump') filter on Solana
+      if (isSolana && !String(mint).endsWith('pump')) continue;
+      if (!trendingSignalPass(row)) continue;
       const token = { ...row, address: mint, interval, rank: index + 1, seenAt };
       trending.set(mint, token);
       tracked += 1;

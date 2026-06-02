@@ -1,6 +1,8 @@
 import axios from 'axios';
 import { WSOL_MINT, JSON_HEADERS } from '../config.js';
 import { now } from '../utils.js';
+import { getActiveChain } from '../chain/config.js';
+import { fetchTokenInfo as dexFetchTokenInfo } from '../chain/dexscreener.js';
 
 const jupiterAssetCache = new Map();
 let jupiterAssetBackoffUntil = 0;
@@ -221,7 +223,107 @@ async function fetchJupiterWalletPnl(walletAddress) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Chain-aware wrappers — route to Jupiter (Solana) or DexScreener (EVM)
+// ---------------------------------------------------------------------------
+
+function isEvmChain() {
+  try {
+    return getActiveChain().type === 'evm';
+  } catch {
+    return false;
+  }
+}
+
+function evmNativeSymbol() {
+  try {
+    return getActiveChain().nativeToken?.symbol || 'ETH';
+  } catch {
+    return 'ETH';
+  }
+}
+
+/**
+ * Chain-aware token asset fetcher.
+ * Solana  → fetchJupiterAsset (Jupiter Data API)
+ * EVM     → dexscreener.fetchTokenInfo, normalized to Jupiter shape
+ */
+async function fetchTokenAsset(mint, opts) {
+  if (!isEvmChain()) {
+    return fetchJupiterAsset(mint, opts);
+  }
+  // EVM path — DexScreener
+  try {
+    const info = await dexFetchTokenInfo(mint);
+    if (!info) return null;
+    // Normalize to Jupiter asset shape
+    return {
+      id: info.address,
+      name: info.name,
+      symbol: info.symbol,
+      usdPrice: info.price ?? null,
+      mcap: info.marketCap || 0,
+      fdv: info.marketCap || 0,
+      liquidity: info.liquidity || 0,
+      holderCount: 0, // DexScreener doesn't provide holder count
+      volume24h: info.volume24h || 0,
+      priceChange24h: info.priceChange24h || 0,
+      source: 'dexscreener',
+      _raw: info,
+    };
+  } catch (err) {
+    console.log(`[asset-evm] ${mint.slice(0, 10)}... ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Chain-aware holder fetcher.
+ * Solana  → fetchJupiterHolders
+ * EVM     → stub (DexScreener has no holder data)
+ */
+async function fetchTokenHolders(mint) {
+  if (!isEvmChain()) {
+    return fetchJupiterHolders(mint);
+  }
+  return { count: 0, holders: [], top20: [], top20Percent: null, maxHolderPercent: null, source: 'stub_evm' };
+}
+
+/**
+ * Chain-aware chart context fetcher.
+ * Solana  → fetchJupiterChartContext
+ * EVM     → null (no equivalent endpoint wired yet)
+ */
+async function fetchTokenChartContext(mint) {
+  if (!isEvmChain()) {
+    return fetchJupiterChartContext(mint);
+  }
+  return null;
+}
+
+/**
+ * Chain-aware native-token price.
+ * Solana  → fetchSolUsdPrice (SOL via Jupiter)
+ * EVM     → DexScreener pair price for wrapped native
+ */
+async function fetchNativePrice() {
+  if (!isEvmChain()) {
+    return fetchSolUsdPrice();
+  }
+  try {
+    const chain = getActiveChain();
+    const wrapped = chain.wrappedNative;
+    if (!wrapped) return null;
+    const info = await dexFetchTokenInfo(wrapped);
+    return info?.price ?? null;
+  } catch (err) {
+    console.log(`[native-price-evm] ${err.message}`);
+    return null;
+  }
+}
+
 export {
+  // Original Solana-specific exports (backward compatible)
   jupiterStatsForInterval,
   normalizeJupiterTrendingRow,
   fetchJupiterAsset,
@@ -234,4 +336,9 @@ export {
   fetchJupiterWalletPnl,
   jupiterAssetBackoffActive,
   setJupiterAssetBackoff,
+  // New chain-aware exports (route Jupiter ↔ DexScreener)
+  fetchTokenAsset,
+  fetchTokenHolders,
+  fetchTokenChartContext,
+  fetchNativePrice,
 };

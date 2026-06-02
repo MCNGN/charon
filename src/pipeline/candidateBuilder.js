@@ -1,16 +1,161 @@
-import { now, firstPositiveNumber, marketCapFromGmgn, tokenPriceFromGmgn, lamToSol } from '../utils.js';
+import { now, firstPositiveNumber, marketCapFromGmgn, tokenPriceFromGmgn, toNative } from '../utils.js';
+import { getActiveChain } from '../chain/config.js';
+import * as dexscreener from '../chain/dexscreener.js';
 import { activeStrategy } from '../db/settings.js';
 import { fetchGmgnTokenInfo } from '../enrichment/gmgn.js';
-import { fetchJupiterAsset, fetchJupiterHolders, fetchJupiterChartContext } from '../enrichment/jupiter.js';
 import { fetchSavedWalletExposure } from '../enrichment/wallets.js';
 import { fetchTwitterNarrative } from '../enrichment/twitter.js';
 import { gmgnLink } from '../format.js';
+
+// Lazy-loaded Jupiter module (Solana only)
+let jupiter = null;
+async function getJupiter() {
+  if (!jupiter) {
+    jupiter = await import('../enrichment/jupiter.js');
+  }
+  return jupiter;
+}
+
+/**
+ * Normalize DexScreener token info to a shape compatible with Jupiter asset
+ * so downstream code (buildCandidate) doesn't need chain-specific branches.
+ */
+function normalizeDexScreenerToken(info) {
+  if (!info) return null;
+  return {
+    id: info.address,
+    name: info.name,
+    symbol: info.symbol,
+    usdPrice: info.price,
+    mcap: info.marketCap,
+    fdv: info.marketCap,
+    liquidity: info.liquidity,
+    holderCount: null, // DexScreener doesn't provide holder data
+    fees: null,        // DexScreener doesn't provide fee data
+    twitter: null,
+    website: null,
+    telegram: null,
+    // pass through pair info for chart lookups
+    pairAddress: info.pairAddress,
+  };
+}
+
+/**
+ * DexScreener has no holder endpoint — return an empty stub matching Jupiter shape.
+ */
+function emptyHolders() {
+  return { count: 0, holders: [], top20: [], top20Percent: null, maxHolderPercent: null };
+}
+
+/**
+ * Compute ATH/range context from DexScreener OHLCV candles (GeckoTerminal).
+ * Adapts to the same shape as fetchJupiterChartContext.
+ */
+function chartContextFromCandles(candles, label) {
+  if (!candles || !candles.length) return { label, available: false };
+  const first = candles[0];
+  const last = candles[candles.length - 1];
+  const high = Math.max(...candles.map(c => Number(c.high || 0)));
+  const low = Math.min(...candles.map(c => Number(c.low || Infinity)));
+  const volumeNative = candles.reduce((sum, c) => sum + Number(c.volume || 0), 0);
+  const current = Number(last.close);
+  const start = Number(first.open);
+  return {
+    label,
+    available: true,
+    purpose: label === 'ath_context_24h_5m' ? 'ath_context' : 'range_context',
+    candles: candles.length,
+    fromTime: first.timestamp,
+    toTime: last.timestamp,
+    current,
+    high,
+    low,
+    volumeNative,
+    changePercent: start > 0 ? (current / start - 1) * 100 : null,
+    belowHighPercent: high > 0 ? (current / high - 1) * 100 : null,
+    aboveLowPercent: low > 0 && Number.isFinite(low) ? (current / low - 1) * 100 : null,
+  };
+}
+
+async function fetchDexScreenerChartContext(pairAddress) {
+  if (!pairAddress) return null;
+
+  const timeframes = [
+    ['1h', 24, 'ath_context_24h_5m'],   // 24 × 1h candles ≈ 24h
+    ['1h', 168, 'swing_7d_1h'],          // 168 × 1h candles ≈ 7d
+    ['4h', 180, 'long_30d_4h'],          // 180 × 4h candles ≈ 30d
+  ];
+
+  const results = await Promise.all(timeframes.map(([interval, , label]) =>
+    dexscreener.fetchChart(pairAddress, interval)
+      .then(candles => chartContextFromCandles(candles, label))
+      .catch((err) => {
+        console.log(`[chart-dex] ${pairAddress.slice(0, 8)}... ${interval} ${err.message}`);
+        return { label, available: false, error: err.message };
+      })
+  ));
+
+  const available = results.filter(row => row.available);
+  const currentNative = available[0]?.current ?? null;
+  const rangeHigh = available.length ? Math.max(...available.map(row => Number(row.high || 0))) : null;
+  const topBlastRisk = Number.isFinite(Number(currentNative)) && Number.isFinite(Number(rangeHigh)) && rangeHigh > 0
+    ? currentNative / rangeHigh >= 0.85
+    : null;
+
+  return {
+    quote: 'native',
+    purpose: 'ATH/range context, not momentum scoring',
+    currentNative,
+    rangeHighNative: rangeHigh,
+    belowRangeHighPercent: currentNative && rangeHigh ? (currentNative / rangeHigh - 1) * 100 : null,
+    distanceFromAthPercent: currentNative && rangeHigh ? (currentNative / rangeHigh - 1) * 100 : null,
+    topBlastRisk,
+    windows: results,
+  };
+}
+
+/**
+ * Chain-agnostic fetch wrappers.
+ * On Solana: use Jupiter Data API.
+ * On EVM chains: use DexScreener / GeckoTerminal.
+ */
+async function fetchTokenData(mint) {
+  const chain = getActiveChain();
+  if (chain.type === 'solana') {
+    const jup = await getJupiter();
+    return jup.fetchJupiterAsset(mint);
+  }
+  const info = await dexscreener.fetchTokenInfo(mint);
+  return normalizeDexScreenerToken(info);
+}
+
+async function fetchHolderData(mint) {
+  const chain = getActiveChain();
+  if (chain.type === 'solana') {
+    const jup = await getJupiter();
+    return jup.fetchJupiterHolders(mint);
+  }
+  // DexScreener has no holder endpoint
+  return emptyHolders();
+}
+
+async function fetchChartData(mint, tokenData) {
+  const chain = getActiveChain();
+  if (chain.type === 'solana') {
+    const jup = await getJupiter();
+    return jup.fetchJupiterChartContext(mint);
+  }
+  // For EVM: use DexScreener chart via the pair address from token info
+  const pairAddress = tokenData?.pairAddress;
+  return fetchDexScreenerChartContext(pairAddress);
+}
 
 export function buildFeeSnapshot(fee, signature) {
   return {
     mint: fee.mint,
     signature,
-    distributedSol: lamToSol(fee.distributed),
+    // DB field kept as distributedSol for backward compatibility
+    distributedSol: toNative(fee.distributed),
     recipients: fee.shareholders.map(holder => ({
       address: holder.pubkey,
       bps: holder.bps,
@@ -29,13 +174,15 @@ export function signalLabel(signals = {}) {
 
 export function filterCandidate(candidate) {
   const strat = activeStrategy();
+  const chain = getActiveChain();
+  const nativeSymbol = chain.nativeToken.symbol;
   const failures = [];
   const mcap = candidate.metrics.marketCapUsd;
   const totalFees = candidate.metrics.gmgnTotalFeesSol;
   const gradVolume = candidate.metrics.graduatedVolumeUsd;
   const maxHolder = candidate.holders.maxHolderPercent;
   const savedCount = candidate.savedWalletExposure.holderCount;
-  const feeSol = candidate.feeClaim?.distributedSol;
+  const feeNative = candidate.feeClaim?.distributedSol; // DB field kept as-is
   const holderCount = Number(candidate.metrics.holderCount || 0);
   const trendingVolume = Number(candidate.trending?.volume ?? 0);
   const trendingSwaps = Number(candidate.trending?.swaps ?? 0);
@@ -45,8 +192,8 @@ export function filterCandidate(candidate) {
   // Fee claim check
   if (candidate.feeClaim) {
     const minFee = strat.min_fee_claim_sol ?? 0.5;
-    if (minFee > 0 && feeSol < minFee) {
-      failures.push(`fee claim: ${feeSol} SOL < min ${minFee} SOL`);
+    if (minFee > 0 && feeNative < minFee) {
+      failures.push(`fee claim: ${feeNative} ${nativeSymbol} < min ${minFee} ${nativeSymbol}`);
     }
   } else if (strat.require_fee_claim) {
     failures.push('fee claim: missing (required by strategy)');
@@ -60,7 +207,7 @@ export function filterCandidate(candidate) {
     failures.push(`market cap max: ${mcap} > ${strat.max_mcap_usd}`);
   }
 
-  // GMGN fees — only enforce when GMGN data is available; Jupiter has no equivalent
+  // GMGN fees — only enforce when GMGN data is available; Jupiter/DexScreener has no equivalent
   if (strat.min_gmgn_total_fee_sol > 0 && candidate.gmgn !== null && totalFees < strat.min_gmgn_total_fee_sol) {
     failures.push(`GMGN total fees: ${totalFees} < ${strat.min_gmgn_total_fee_sol}`);
   }
@@ -118,16 +265,16 @@ export function filterCandidate(candidate) {
 export async function buildCandidate({ mint, fee = null, signature = null, graduatedCoin = null, trendingToken = null, route }) {
   const strat = activeStrategy();
   const gmgn = await fetchGmgnTokenInfo(mint);
-  const jupiterAsset = await fetchJupiterAsset(mint);
-  const holders = await fetchJupiterHolders(mint);
-  const chart = await fetchJupiterChartContext(mint);
+  const tokenData = await fetchTokenData(mint);
+  const holders = await fetchHolderData(mint);
+  const chart = await fetchChartData(mint, tokenData);
   const savedWalletExposure = await fetchSavedWalletExposure(mint, holders);
-  const twitterNarrative = await fetchTwitterNarrative(graduatedCoin || jupiterAsset, gmgn);
-  const priceUsd = firstPositiveNumber(tokenPriceFromGmgn(gmgn), jupiterAsset?.usdPrice, trendingToken?.price);
+  const twitterNarrative = await fetchTwitterNarrative(graduatedCoin || tokenData, gmgn);
+  const priceUsd = firstPositiveNumber(tokenPriceFromGmgn(gmgn), tokenData?.usdPrice, trendingToken?.price);
   const marketCapUsd = firstPositiveNumber(
     marketCapFromGmgn(gmgn),
-    jupiterAsset?.mcap,
-    jupiterAsset?.fdv,
+    tokenData?.mcap,
+    tokenData?.fdv,
     trendingToken?.market_cap,
     graduatedCoin?.marketCap,
     graduatedCoin?.usd_market_cap,
@@ -141,19 +288,19 @@ export async function buildCandidate({ mint, fee = null, signature = null, gradu
   const candidate = {
     token: {
       mint,
-      name: gmgn?.name || jupiterAsset?.name || trendingToken?.name || graduatedCoin?.name || '',
-      symbol: gmgn?.symbol || jupiterAsset?.symbol || trendingToken?.symbol || graduatedCoin?.ticker || '',
+      name: gmgn?.name || tokenData?.name || trendingToken?.name || graduatedCoin?.name || '',
+      symbol: gmgn?.symbol || tokenData?.symbol || trendingToken?.symbol || graduatedCoin?.ticker || '',
       gmgnUrl: gmgn?.link?.gmgn || gmgnLink(mint),
-      twitter: graduatedCoin?.twitter || jupiterAsset?.twitter || gmgn?.link?.twitter_username || trendingToken?.twitter || '',
-      website: graduatedCoin?.website || jupiterAsset?.website || gmgn?.link?.website || '',
+      twitter: graduatedCoin?.twitter || tokenData?.twitter || gmgn?.link?.twitter_username || trendingToken?.twitter || '',
+      website: graduatedCoin?.website || tokenData?.website || gmgn?.link?.website || '',
       telegram: graduatedCoin?.telegram || gmgn?.link?.telegram || '',
     },
     metrics: {
       priceUsd,
       marketCapUsd,
-      liquidityUsd: Number(gmgn?.liquidity ?? jupiterAsset?.liquidity ?? trendingToken?.liquidity ?? 0),
-      holderCount: Number(gmgn?.holder_count ?? jupiterAsset?.holderCount ?? trendingToken?.holder_count ?? graduatedCoin?.numHolders ?? 0),
-      gmgnTotalFeesSol: Number(gmgn?.total_fee ?? jupiterAsset?.fees ?? 0),
+      liquidityUsd: Number(gmgn?.liquidity ?? tokenData?.liquidity ?? trendingToken?.liquidity ?? 0),
+      holderCount: Number(gmgn?.holder_count ?? tokenData?.holderCount ?? trendingToken?.holder_count ?? graduatedCoin?.numHolders ?? 0),
+      gmgnTotalFeesSol: Number(gmgn?.total_fee ?? tokenData?.fees ?? 0),
       gmgnTradeFeesSol: Number(gmgn?.trade_fee ?? 0),
       graduatedVolumeUsd: Number(graduatedCoin?.volume ?? 0),
       graduatedMarketCapUsd: Number(graduatedCoin?.marketCap ?? 0),
@@ -179,7 +326,7 @@ export async function buildCandidate({ mint, fee = null, signature = null, gradu
     trending: trendingToken,
     feeClaim: fee ? buildFeeSnapshot(fee, signature) : null,
     gmgn,
-    jupiterAsset,
+    jupiterAsset: tokenData, // field kept for backward compat; on EVM contains normalized DexScreener data
     holders,
     chart,
     savedWalletExposure,

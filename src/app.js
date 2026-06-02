@@ -7,13 +7,21 @@ import { monitorPositions } from './execution/positions.js';
 import { processCandidateFromSignals, maybeProcessDegenCandidate } from './pipeline/orchestrator.js';
 import { sendTelegram } from './telegram/send.js';
 import { makeFailureTracker } from './utils.js';
+import { getActiveChain } from './chain/config.js';
 
 setDefaultResultOrder('ipv4first');
 validateConfig();
 
 export async function startCharon() {
   initDb();
-  initLiveExecution();
+  await initLiveExecution();
+
+  const chain = getActiveChain();
+  console.log(`\n  ╔══════════════════════════════════════════╗`);
+  console.log(`  ║  ${APP_NAME} — ${chain.name} (${chain.type})${' '.repeat(Math.max(0, 28 - chain.name.length - chain.type.length))}║`);
+  console.log(`  ║  Chain: ${chain.id}${' '.repeat(Math.max(0, 33 - chain.id.length))}║`);
+  console.log(`  ╚══════════════════════════════════════════╝\n`);
+
   setupTelegram();
 
   if (SIGNAL_SERVER_URL) {
@@ -40,21 +48,26 @@ export async function startCharon() {
     console.log(`[bot] ${APP_NAME} started (server mode: ${SIGNAL_SERVER_URL})`);
   } else {
     // ── Standalone mode: direct polling (legacy) ───────────────────────────
-    const { fetchGraduatedCoins } = await import('./signals/graduated.js');
     const { fetchGmgnTrending, setDegenHandler } = await import('./signals/trending.js');
-    const { startWebsocket, setCandidateHandler } = await import('./signals/feeClaim.js');
 
     setDegenHandler(maybeProcessDegenCandidate);
-    setCandidateHandler(processCandidateFromSignals);
 
-    await fetchGraduatedCoins().catch(error => console.log(`[graduated] initial fetch failed: ${error.message}`));
+    // Trending polling works on all chains (DexScreener+GMGN on EVM, Jupiter/GMGN on Solana)
     await fetchGmgnTrending().catch(error => console.log(`[trending] initial fetch failed: ${error.message}`));
-
-    setInterval(() => fetchGraduatedCoins().catch(error => console.log(`[graduated] ${error.message}`)), GRADUATED_POLL_MS);
     setInterval(() => fetchGmgnTrending().catch(error => console.log(`[trending] ${error.message}`)), TRENDING_POLL_MS);
-    startWebsocket();
 
-    console.log(`[bot] ${APP_NAME} started (standalone mode)`);
+    // Solana-only: Pump.fun graduated coins + fee claim WebSocket
+    if (chain.type === 'solana') {
+      const { fetchGraduatedCoins } = await import('./signals/graduated.js');
+      const { startWebsocket, setCandidateHandler } = await import('./signals/feeClaim.js');
+      setCandidateHandler(processCandidateFromSignals);
+
+      await fetchGraduatedCoins().catch(error => console.log(`[graduated] initial fetch failed: ${error.message}`));
+      setInterval(() => fetchGraduatedCoins().catch(error => console.log(`[graduated] ${error.message}`)), GRADUATED_POLL_MS);
+      startWebsocket();
+    }
+
+    console.log(`[bot] ${APP_NAME} started (standalone mode, ${chain.name})`);
   }
 
   // Position monitoring runs in both modes
