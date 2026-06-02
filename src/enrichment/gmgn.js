@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { GMGN_API_KEY, GMGN_CACHE_TTL_MS, GMGN_ENABLED, JSON_HEADERS } from '../config.js';
 import { now, sleep } from '../utils.js';
+import { getActiveChain } from '../chain/config.js';
 import { numSetting, setting } from '../db/settings.js';
 
 const gmgnCache = new Map();
@@ -153,7 +154,7 @@ async function fetchGmgnTokenInfo(mint, useCache = true) {
 
   try {
     const payload = await gmgnFetch('/v1/token/info', {
-      params: { chain: 'sol', address: mint },
+      params: { chain: getActiveChain().gmgn.chain, address: mint },
     });
     const data = payload?.data?.data || payload?.data || payload;
     gmgnCache.set(mint, { at: now(), data });
