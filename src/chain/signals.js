@@ -39,7 +39,7 @@ export async function fetchGmgnTrending(limit = 20, orderby = 'swaps', timeframe
   }
 
   const data = await res.json();
-  return (data.data?.rank || []).map(t => ({
+  return (data.data?.data?.rank || data.data?.rank || []).map(t => ({
     address: t.address,
     symbol: t.symbol,
     name: t.name,
