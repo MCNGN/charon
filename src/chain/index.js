@@ -2,7 +2,7 @@
 // Main chain abstraction entry point
 // Provides a unified interface regardless of active chain
 
-import { getActiveChain, getChain, listChains, CHAINS } from './config.js';
+import { getActiveChain, getChain, listChains } from './config.js';
 import { formatNative, fromSmallestUnit, toSmallestUnit, txLink, accountLink, tokenLink, gmgnLink, fmtNative, fmtUsd, normalizeAddress, isWrappedNative } from './utils.js';
 import * as dexscreener from './dexscreener.js';
 
@@ -163,7 +163,7 @@ export {
   getActiveChain,
   getChain,
   listChains,
-  CHAINS,
+
   formatNative,
   fromSmallestUnit,
   toSmallestUnit,
