@@ -4,6 +4,7 @@
 // EVM: DexScreener trending + GMGN trending + new token monitoring
 
 import { getActiveChain } from './config.js';
+import { randomUUID } from 'node:crypto';
 import * as dexscreener from './dexscreener.js';
 
 const GMGN_BASE = 'https://openapi.gmgn.ai';
@@ -23,6 +24,7 @@ export async function fetchGmgnTrending(limit = 20, orderby = 'swaps', timeframe
   url.searchParams.set('direction', 'desc');
   url.searchParams.set('period', timeframe);
   url.searchParams.set('timestamp', Math.floor(Date.now() / 1000).toString());
+  url.searchParams.set('client_id', randomUUID());
 
   const res = await fetch(url, {
     headers: {
@@ -67,6 +69,7 @@ export async function fetchGmgnTokenInfo(address) {
   url.searchParams.set('chain', chain.gmgn.chain);
   url.searchParams.set('address', address);
   url.searchParams.set('timestamp', Math.floor(Date.now() / 1000).toString());
+  url.searchParams.set('client_id', randomUUID());
 
   const res = await fetch(url, {
     headers: {
