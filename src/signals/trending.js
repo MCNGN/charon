@@ -10,9 +10,14 @@ import { fetchCombinedTrending } from '../chain/signals.js';
 
 export const trending = new Map();
 let degenHandler = null;
+let candidateHandler = null;
 
 export function setDegenHandler(fn) {
   degenHandler = fn;
+}
+
+export function setCandidateHandler(fn) {
+  candidateHandler = fn;
 }
 
 export function storeSignalEvent(mint, kind, source, payload) {
@@ -141,7 +146,13 @@ export async function fetchGmgnTrending() {
       trending.set(mint, token);
       tracked += 1;
       storeSignalEvent(mint, 'trending', token.source || source, token);
-      if (degenHandler) await degenHandler(mint, token);
+      // On EVM chains, process trending tokens directly as candidates
+      // (no Pump.fun graduation required)
+      if (!isSolana && candidateHandler) {
+        await candidateHandler({ mint, trendingToken: token, route: 'trending' });
+      } else if (degenHandler) {
+        await degenHandler(mint, token);
+      }
     }
     console.log(`[trending:${source}] loaded ${rows.length}, accepted ${tracked}, tracking ${trending.size}`);
   } catch (err) {

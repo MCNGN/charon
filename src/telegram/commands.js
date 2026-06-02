@@ -37,6 +37,7 @@ export async function handleMessage(msg) {
   if (!text.startsWith('/')) return;
   if (text.startsWith('/menu')) return sendMenu(chatId);
   if (text.startsWith('/positions')) return sendPositions(chatId);
+  if (text.startsWith('/open')) return sendOpenPositions(chatId);
   if (text.startsWith('/filters')) return bot.sendMessage(chatId, filtersText(), { parse_mode: 'HTML' });
   if (text.startsWith('/strategy')) {
     const parts = text.split(/\s+/);
@@ -152,6 +153,13 @@ export async function sendCandidate(chatId, id) {
     disable_web_page_preview: true,
     ...candidateButtons(id, decision),
   });
+}
+
+export async function sendOpenPositions(chatId) {
+  const rows = openPositions();
+  if (!rows.length) return bot.sendMessage(chatId, 'No open positions.');
+  const text = rows.map(formatPosition).join('\n\n');
+  await bot.sendMessage(chatId, `📍 <b>Open Positions (${rows.length})</b>\n\n${text}`, { parse_mode: 'HTML', disable_web_page_preview: true });
 }
 
 export async function sendPositions(chatId) {
@@ -294,6 +302,10 @@ async function sendPnl(chatId, query = null) {
 function parseSetFilter(text) {
   const parts = text.trim().split(/\s+/);
   return { key: parts[1], value: parts[2] };
+}
+
+function openPositions() {
+  return db.prepare('SELECT * FROM dry_run_positions WHERE status = ? ORDER BY opened_at_ms DESC').all('open');
 }
 
 function allPositions(limit = 10) {

@@ -48,9 +48,10 @@ export async function startCharon() {
     console.log(`[bot] ${APP_NAME} started (server mode: ${SIGNAL_SERVER_URL})`);
   } else {
     // ── Standalone mode: direct polling (legacy) ───────────────────────────
-    const { fetchGmgnTrending, setDegenHandler } = await import('./signals/trending.js');
+    const { fetchGmgnTrending, setDegenHandler, setCandidateHandler: setTrendingCandidateHandler } = await import('./signals/trending.js');
 
     setDegenHandler(maybeProcessDegenCandidate);
+    setTrendingCandidateHandler(processCandidateFromSignals);
 
     // Trending polling works on all chains (DexScreener+GMGN on EVM, Jupiter/GMGN on Solana)
     await fetchGmgnTrending().catch(error => console.log(`[trending] initial fetch failed: ${error.message}`));
