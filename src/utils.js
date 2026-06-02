@@ -1,3 +1,5 @@
+import { getActiveChain } from './chain/config.js';
+
 export function now() {
   return Date.now();
 }
@@ -86,6 +88,34 @@ export function readI64(buf, offset) {
 
 export function lamToSol(lamports) {
   return Number(lamports) / 1_000_000_000;
+}
+
+/**
+ * Convert smallest unit to native token amount (chain-agnostic)
+ * Solana: lamports → SOL (÷ 1e9)
+ * EVM: wei → ETH/BNB (÷ 1e18)
+ */
+export function toNative(smallest) {
+  try {
+    const chain = getActiveChain();
+    return Number(smallest) / 10 ** chain.nativeToken.decimals;
+  } catch {
+    return lamToSol(smallest); // fallback to SOL
+  }
+}
+
+/**
+ * Convert native token amount to smallest unit (chain-agnostic)
+ * Solana: SOL → lamports (× 1e9)
+ * EVM: ETH/BNB → wei (× 1e18)
+ */
+export function fromNative(amount) {
+  try {
+    const chain = getActiveChain();
+    return BigInt(Math.round(amount * 10 ** chain.nativeToken.decimals));
+  } catch {
+    return BigInt(Math.round(amount * 1_000_000_000));
+  }
 }
 
 export function discMatch(buf, disc) {

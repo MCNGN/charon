@@ -1,11 +1,16 @@
 {
   "name": "charon",
-  "version": "1.0.0",
+  "version": "2.0.0",
+  "description": "Multi-chain Telegram trading bot (Solana, Base, BSC, Ethereum, Arbitrum)",
   "type": "module",
   "private": true,
   "scripts": {
     "start": "node index.js",
-    "check": "node --check index.js && node --check src/app.js && node --check src/config.js && node --check src/liveExecutor.js"
+    "check": "node --check index.js && node --check src/app.js && node --check src/config.js && node --check src/chain/index.js",
+    "start:base": "CHAIN=base node index.js",
+    "start:bsc": "CHAIN=bsc node index.js",
+    "start:eth": "CHAIN=ethereum node index.js",
+    "start:arb": "CHAIN=arbitrum node index.js"
   },
   "dependencies": {
     "@solana/web3.js": "^1.98.4",
@@ -14,6 +19,7 @@
     "bs58": "^6.0.0",
     "dotenv": "^16.4.7",
     "node-telegram-bot-api": "^0.66.0",
+    "viem": "^2.21.0",
     "ws": "^8.18.0"
   }
 }
