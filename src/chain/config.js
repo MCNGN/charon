@@ -2,7 +2,7 @@
 // Chain-specific configuration registry.
 // Each chain defines: RPC, explorer, native token, wrapped token, DEX endpoints, etc.
 
-const CHAINS = {
+export const CHAINS = {
   solana: {
     id: 'solana',
     name: 'Solana',
