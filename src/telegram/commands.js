@@ -158,8 +158,11 @@ export async function sendCandidate(chatId, id) {
 export async function sendOpenPositions(chatId) {
   const rows = openPositions();
   if (!rows.length) return bot.sendMessage(chatId, 'No open positions.');
-  const text = rows.map(formatPosition).join('\n\n');
-  await bot.sendMessage(chatId, `📍 <b>Open Positions (${rows.length})</b>\n\n${text}`, { parse_mode: 'HTML', disable_web_page_preview: true });
+  for (const row of rows) {
+    const text = formatPosition(row);
+    const buttons = positionButtons(row.id);
+    await bot.sendMessage(chatId, text, { parse_mode: 'HTML', disable_web_page_preview: true, ...buttons });
+  }
 }
 
 export async function sendPositions(chatId) {
