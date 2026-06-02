@@ -146,9 +146,8 @@ export async function fetchGmgnTrending() {
       trending.set(mint, token);
       tracked += 1;
       storeSignalEvent(mint, 'trending', token.source || source, token);
-      // On EVM chains, process trending tokens directly as candidates
-      // (no Pump.fun graduation required)
-      if (!isSolana && candidateHandler) {
+      // Process trending tokens as candidates
+      if (candidateHandler) {
         await candidateHandler({ mint, trendingToken: token, route: 'trending' });
       } else if (degenHandler) {
         await degenHandler(mint, token);

@@ -209,6 +209,46 @@ export function initDb() {
   ensureColumn('dry_run_positions', 'partial_tp_done', 'INTEGER DEFAULT 0');
   ensureColumn('decision_logs', 'strategy_id', 'TEXT');
 
+  // Migration: add degen_v2 strategy if not exists
+  const degenV2Exists = db.prepare('SELECT id FROM strategies WHERE id = ?').get('degen_v2');
+  if (!degenV2Exists) {
+    const ts = Date.now();
+    db.prepare('INSERT INTO strategies (id, name, enabled, config_json, created_at_ms) VALUES (?, ?, ?, ?, ?)').run(
+      'degen_v2', 'Degen V2 (Fast Profit)', 0, JSON.stringify({
+        entry_mode: 'immediate',
+        min_source_count: 1,
+        require_fee_claim: false,
+        token_age_max_ms: 7200000,
+        min_mcap_usd: 20000,
+        max_mcap_usd: 2000000,
+        min_fee_claim_sol: 0,
+        min_gmgn_total_fee_sol: 0,
+        min_holders: 50,
+        max_top20_holder_percent: 70,
+        min_saved_wallet_holders: 0,
+        max_ath_distance_pct: 0,
+        min_graduated_volume_usd: 0,
+        trending_min_volume_usd: 5000,
+        trending_min_swaps: 20,
+        trending_max_rug_ratio: 0.4,
+        trending_max_bundler_rate: 0.5,
+        position_size_sol: 0.03,
+        max_open_positions: 8,
+        tp_percent: 25,
+        sl_percent: -12,
+        trailing_enabled: true,
+        trailing_percent: 8,
+        partial_tp: true,
+        partial_tp_at_percent: 15,
+        partial_tp_sell_percent: 50,
+        max_hold_ms: 3600000,
+        use_llm: false,
+        llm_min_confidence: 0,
+      }), ts
+    );
+    console.log('[db] Migrated: added degen_v2 strategy');
+  }
+
   const defaults = {
     agent_enabled: 'true',
     trading_mode: process.env.TRADING_MODE || 'dry_run',
@@ -373,6 +413,38 @@ export function initDb() {
     partial_tp_sell_percent: 0,
     max_hold_ms: 0,
     use_llm: false,
+    llm_min_confidence: 0,
+  }), ts);
+
+  stratInsert.run('degen_v2', 'Degen V2 (Fast Profit)', 0, JSON.stringify({
+    entry_mode: 'immediate',
+    min_source_count: 1,
+    require_fee_claim: false,
+    token_age_max_ms: 7200000,       // 2 jam — token baru tapi bukan brand new
+    min_mcap_usd: 20000,             // minimal 20K — hindari micro cap yang gampang rug
+    max_mcap_usd: 2000000,           // maximal 2M — masih ada room untuk pump
+    min_fee_claim_sol: 0,
+    min_gmgn_total_fee_sol: 0,
+    min_holders: 50,                 // minimal 50 holder — bukti ada minat
+    max_top20_holder_percent: 70,    // top 20 holder pegang < 70%
+    min_saved_wallet_holders: 0,
+    max_ath_distance_pct: 0,
+    min_graduated_volume_usd: 0,
+    trending_min_volume_usd: 5000,   // minimal volume 5K — ada aktivitas
+    trending_min_swaps: 20,          // minimal 20 swap — bukti ada trading
+    trending_max_rug_ratio: 0.4,     // rug ratio < 40%
+    trending_max_bundler_rate: 0.5,  // bundler rate < 50%
+    position_size_sol: 0.03,         // posisi kecil — diversifikasi
+    max_open_positions: 8,           // lebih banyak posisi
+    tp_percent: 25,                  // TP 25% — ambil profit cepat
+    sl_percent: -12,                 // SL -12% — potong loss cepat
+    trailing_enabled: true,
+    trailing_percent: 8,             // trailing 8% — lock profit ketat
+    partial_tp: true,
+    partial_tp_at_percent: 15,       // jual 50% saat +15%
+    partial_tp_sell_percent: 50,     // sisanya hold pakai trailing
+    max_hold_ms: 3600000,            // max hold 1 jam — paksa exit kalau stuck
+    use_llm: false,                  // no LLM — langsung eksekusi
     llm_min_confidence: 0,
   }), ts);
 }
